@@ -1,28 +1,28 @@
 from functools import reduce
 from math import sqrt
 from operator import mul
-from typing import *
 
 import torch
 from torch import Tensor
 
-from ._config import CONFIG
-from ._utils import scaled_matmul
+from . import config
 from .eigh import truncated_eigh
-from .qr import qr
+from .qb import randomized_qb
+from .utils import scaled_matmul
 
 
 def truncated_svd(
     A: Tensor,
-    rank: Optional[int] = None,
-) -> Tuple[Tensor, Tensor, Tensor]:
+    rank: int | None = None,
+) -> tuple[Tensor, Tensor, Tensor]:
     """
-    Truncated singular value decomposition.
+    Truncated singular value decomposition,
+    defined as `A = U @ S.diag_embed() @ V.mT`.
 
     Args:
         A (Tensor):
             &#45; with shape `(*, m, n)`.
-        rank (int, optional):
+        rank (int or None, optional):
             &#45; target `rank`. If `None`, then `k = min(m, n)`.
             Default: `None`.
 
@@ -31,21 +31,21 @@ def truncated_svd(
             &#45; with shape `(*, m, k)`, `(*, k)`, `(*, n, k)`, where `k = min(m, n, rank)`.
     """
     assert isinstance(A, Tensor)
-    assert isinstance(rank, Optional[int])
+    assert isinstance(rank, int | None)
 
     m, n = A.shape[-2], A.shape[-1]
 
     if m <= n:
-        AAT = scaled_matmul(A, A.mT)  # (*, m, m)
-        L, U = truncated_eigh(AAT, rank)  # (*, k), (*, m, k)  ## A = U @ S @ VT ==> AAT = U @ L @ UT (L = S^2)
+        AAT = (A @ A.mT).div_(sqrt(n))  # (*, m, m)
+        L, U = truncated_eigh(AAT, rank)  # (*, k), (*, m, k)  ## A = U @ S @ VT ==> AAT = U @ L @ UT = U @ S^2 @ UT
+        L.mul_(sqrt(n))
 
-        if CONFIG.SCALING_UNIT:
-            S = L.sqrt()  # (*, k)
-            V = scaled_matmul(A.mT, U).mul_(L.rsqrt().nan_to_num_(0).unsqueeze_(-2))  # (*, n, k)
-        else:
-            S = L.sqrt().mul_(sqrt(n))  # (*, k)
-            V = (A.mT @ U).mul_(L.rsqrt().nan_to_num_(0).unsqueeze_(-2)).div_(sqrt(n))  # (*, n, k)  ## A = U @ S @ VT ==> V = AT @ U @ L^(-1/2)
+        S = L.sqrt()  # (*, k)
+        V = scaled_matmul(A.mT, U).mul_(L.rsqrt().nan_to_num_(0).unsqueeze_(-2))  # (*, n, k)  ## A = U @ S @ VT ==> V = AT @ U @ L^(-1/2)
 
+        if config.SCALING_UNIT:
+            S.div_(sqrt(n))
+            V.mul_(sqrt(n))
     else:
         V, S, U = truncated_svd(A.mT, rank)  # A = U @ S @ VT ==> AT = V @ S @ UT
 
@@ -55,23 +55,29 @@ def truncated_svd(
 def randomized_svd(
     A: Tensor,
     rank: int,
-    n_oversamples: int = 0,
-    n_iters: int = 0,
-) -> Tuple[Tensor, Tensor, Tensor]:
+    nover: int = 0,
+    niter: int = 0,
+    test_matrix: str = "subs",
+) -> tuple[Tensor, Tensor, Tensor]:
     """
-    Randomzied singular value decomposition.
+    Randomzied singular value decomposition,
+    defined as `A = U @ S.diag_embed() @ V.mT`.
 
     Args:
         A (Tensor):
             &#45; with shape `(*, m, n)`.
         rank (int):
             &#45; target `rank`.
-        n_oversamples (int, optional):
-            &#45; number of oversampled vectors.
+        nover (int, optional):
+            &#45; number of overestimated rank.
             Default: `0`.
-        n_iters (int, optional):
+        niter (int, optional):
             &#45; number of power iterations.
             Default: `0`.
+        test_matrix (str, optional):
+            &#45; the type of test matrix.
+            Optional: `'gauss'` | `'subs'`.
+            Default: `'subs'`.
 
     Returns:
         (U, S, V) (Tensor, Tensor, Tensor):
@@ -79,99 +85,26 @@ def randomized_svd(
     """
     assert isinstance(A, Tensor)
     assert isinstance(rank, int)
-    assert isinstance(n_oversamples, int)
-    assert isinstance(n_iters, int)
+    assert isinstance(nover, int)
+    assert isinstance(niter, int)
+    assert isinstance(test_matrix, str)
 
     m, n = A.shape[-2], A.shape[-1]
 
-    k = min(m, n, rank)
-    p = n_oversamples
-
     if m <= n:
-        # Sample column space of A with Ohm matrix, and generate the approximate orthonormal basis Q
-        Ohm = torch.randn(n, k + p, dtype=A.dtype, device=A.device)  # (*, n, k+p)
-        Y = scaled_matmul(A, Ohm)  # (*, m, k+p)
-        for _ in range(n_iters):
-            Q, R = qr(Y)  # (*, m, k+p)
-            Ohm = A.mT @ Q  # (*, n, k+p)
-            Y = scaled_matmul(A, Ohm)  # (*, m, k+p)
-        Q, R = qr(Y)  # (*, m, k+p)
+        k = min(m, n, rank)
+        p = min(nover, m - k)
 
         # Compute SVD on projected B
-        if CONFIG.SCALING_UNIT:
-            B = scaled_matmul(Q.mT, A) * sqrt(k+p) # (*, k+p, n)
-            Ub, S, V = truncated_svd(B, k)  # (*, k+p, k), (*, k), (*, n, k)
-            U = scaled_matmul(Q, Ub) * sqrt(k+p)   # (*, m, k)
-        else:
-            B = Q.mT @ A  # (*, k+p, n)
-            Ub, S, V = truncated_svd(B, k)  # (*, k+p, k), (*, k), (*, n, k)
-            U = Q @ Ub  # (*, m, k)
+        Q, B = randomized_qb(A, k+p, niter=niter, test_matrix=test_matrix, left=True)
+        Ub, S, V = truncated_svd(B, k)  # (*, k+p, k), (*, k), (*, n, k)
+        U = scaled_matmul(Q, Ub)   # (*, m, k)
 
+        if config.SCALING_UNIT:
+            U.mul_(sqrt(k+p))
+            S.mul_(sqrt(k+p))
     else:
-        V, S, U = randomized_svd(A.mT, rank, n_oversamples=n_oversamples, n_iters=n_iters)
-
-    return U, S, V
-
-
-def row_aware_randomized_svd(
-    A: Tensor,
-    rank: int,
-    n_oversamples: int = 0,
-    n_iters: int = 0,
-) -> Tuple[Tensor, Tensor, Tensor]:
-    """
-    Row-aware randomized singular value decomposition.
-    https://arxiv.org/abs/2408.04503
-
-    Args:
-        A (Tensor):
-            &#45; with shape `(*, m, n)`.
-        rank (int):
-            &#45; target `rank`.
-        n_oversamples (int, optional):
-            &#45; number of oversampled vectors.
-            Default: `0`.
-        n_iters (int, optional):
-            &#45; number of power iterations.
-            Default: `0`.
-
-    Returns:
-        (U, S, V) (Tensor, Tensor, Tensor):
-            &#45; with shape `(*, m, k)`, `(*, k)`, `(*, n, k)`, where `k = min(m, n, rank)`.
-    """
-    assert isinstance(A, Tensor)
-    assert isinstance(rank, int)
-    assert isinstance(n_oversamples, int)
-    assert isinstance(n_iters, int)
-
-    m, n = A.shape[-2], A.shape[-1]
-
-    k = min(m, n, rank)
-    p = n_oversamples
-
-    if m <= n:
-        # Sample subspace of A with Ak matrix, and Generate the approximate orthonormal basis Q
-        idx = torch.randperm(m)[:k+p]
-        Ak = A[..., idx, :]  # (*, k+p, n)
-        C = scaled_matmul(A, Ak.mT)  # (*, m, k+p)
-        for _ in range(n_iters):
-            Q, R = qr(C)  # (*, m, k+p)
-            Ohm = A.mT @ Q  # (*, n, k+p)
-            C = scaled_matmul(A, Ohm)  # (*, m, k+p)
-        Q, R = qr(C)  # (*, m, k+p)
-
-        # Compute SVD on projected B
-        if CONFIG.SCALING_UNIT:
-            B = scaled_matmul(Q.mT, A).mul_(sqrt(k+p)) # (*, k+p, n)
-            Ub, S, V = truncated_svd(B, k)  # (*, k+p, k), (*, k), (*, n, k)
-            U = scaled_matmul(Q, Ub).mul_(sqrt(k+p))   # (*, m, k)
-        else:
-            B = Q.mT @ A  # (*, k+p, n)
-            Ub, S, V = truncated_svd(B, k)  # (*, k+p, k), (*, k), (*, n, k)
-            U = Q @ Ub  # (*, m, k)
-
-    else:
-        V, S, U = row_aware_randomized_svd(A.mT, rank, n_oversamples=n_oversamples, n_iters=n_iters)
+        V, S, U = randomized_svd(A.mT, rank, nover=nover, niter=niter)
 
     return U, S, V
 
@@ -179,18 +112,19 @@ def row_aware_randomized_svd(
 def nystrom_svd(
     A: Tensor,
     rank: int,
-    n_oversamples: int = 0,
-) -> Tuple[Tensor, Tensor, Tensor]:
+    nover: int = 0,
+) -> tuple[Tensor, Tensor, Tensor]:
     """
-    Nyström singular value decomposition.
+    Nyström singular value decomposition,
+    defined as `A = U @ S.diag_embed() @ V.mT`.
 
     Args:
         A (Tensor):
             &#45; with shape `(*, m, n)`.
         rank (int):
             &#45; target `rank`.
-        n_oversamples (int, optional):
-            &#45; number of oversampled vectors.
+        nover (int, optional):
+            &#45; number of overestimated rank.
             Default: `0`.
 
     Returns:
@@ -199,33 +133,32 @@ def nystrom_svd(
     """
     assert isinstance(A, Tensor)
     assert isinstance(rank, int)
-    assert isinstance(n_oversamples, int)
+    assert isinstance(nover, int)
 
     m, n = A.shape[-2], A.shape[-1]
 
-    k = min(m, n, rank)
-    p = n_oversamples
-
     if m <= n:
+        k = min(m, n, rank)
+        p = min(nover, m - k)
+
         # Sample subspace of A @ AT such that A @ AT = C @ W^-1 @ CT
         idx = torch.randperm(m)[:k+p]
-        Ak = A[..., idx, :]  # (*, k+p, n)  ## P @ A
-        C = scaled_matmul(A, Ak.mT)  # (*, m, k+p)  ## C = A @ AT @ PT
-        W = C[..., idx, :]  # (*, k+p, k+p)  ## W = P @ A @ AT @ PT
-        Lw, Qw = truncated_eigh(W)  # (*, k+p), (*, k+p, k+p)  ## A @ AT = C @ W^-1 @ CT = C @ Qw @ Lw^-1 @ QwT @ CT
+        Ak = A[..., idx, :]  # (*, k+p, n)
+        C = (A @ Ak.mT).div_(sqrt(n))  # (*, m, k+p)  ## C = A @ AkT
+        W = C[..., idx, :]  # (*, k+p, k+p)  ## W = Ak @ AkT
+        Lw, Uw = truncated_eigh(W)  # (*, k+p), (*, k+p, k+p)  ## A @ AT = C @ W^-1 @ CT = C @ Uw @ Lw^-1 @ UwT @ CT
+        Lw.mul_(sqrt(n))
 
         # Compute SVD on low-rank approximation E where A @ AT = E @ ET
-        if CONFIG.SCALING_UNIT:
-            E = scaled_matmul(C, Qw).mul_(Lw.rsqrt().nan_to_num_(0).unsqueeze_(-2)).mul_(sqrt(len(idx))) # (*, m, k+p)
-            U, S, _ = truncated_svd(E, k)  # (*, m, k), (*, k)
-            V = scaled_matmul(A.mT, U).mul_(S.reciprocal().nan_to_num_(0).unsqueeze_(-2)) # (*, n, k)
-        else:
-            E = (C @ Qw).mul_(Lw.rsqrt().nan_to_num_(0).unsqueeze_(-2)).mul_(sqrt(n))  # (*, m, k+p)  ## E = C @ Qw @ Lw^(-1/2) ==> A @ AT = E @ ET
-            U, S, _ = truncated_svd(E, k)  # (*, m, k), (*, k)  ## A @ AT = E @ ET = U @ S^2 @ UT
-            V = (A.mT @ U).mul_(S.reciprocal().nan_to_num_(0).unsqueeze_(-2))  # (*, n, k)  ## A = U @ S @ VT ==> V = AT @ U @ S^-1
+        E = scaled_matmul(C, Uw).mul_(Lw.rsqrt().nan_to_num_(0).unsqueeze_(-2))  # (*, m, k+p)  ## E = C @ Uw @ Lw^(-1/2) ==> A @ AT = E @ ET
+        U, S, _ = truncated_svd(E, k)  # (*, m, k), (*, k)  ## A @ AT = E @ ET = U @ S^2 @ UT
+        V = scaled_matmul(A.mT, U).mul_(S.reciprocal().nan_to_num_(0).unsqueeze_(-2))  # (*, n, k)  ## A = U @ S @ VT ==> V = AT @ U @ S^-1
 
+        if config.SCALING_UNIT:
+            S.mul_(sqrt(k+p))
+            V.div_(sqrt(k+p))
     else:
-        V, S, U = nystrom_svd(A.mT, rank, n_oversamples=n_oversamples)
+        V, S, U = nystrom_svd(A.mT, rank, nover=nover)
 
     return U, S, V
 
@@ -255,6 +188,6 @@ def svd_reconstruct(
     assert isinstance(V, Tensor)
 
     if reduce(mul, U.shape) < reduce(mul, V.shape):
-        return (U @ S.diag_embed()) @ V.mT
+        return (U * S.unsqueeze(-2)) @ V.mT
     else:
-        return U @ (V @ S.diag_embed()).mT
+        return U @ (V * S.unsqueeze(-2)).mT

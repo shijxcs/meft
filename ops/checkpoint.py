@@ -1,8 +1,8 @@
 import contextlib
-from typing import *
+from collections.abc import Callable
 
 import torch
-from torch import Tensor
+from torch import nn, Tensor
 from torch.utils.checkpoint import (
     _get_device_module, _infer_device_type, get_device_states, set_device_states, _get_autocast_kwargs
 )
@@ -12,9 +12,9 @@ from ..compressed import CompressedTensor
 
 def detach_variable(
     hidden_states: Tensor,
-    args: Tuple[Any, ...],
-    kwargs: Mapping[str, Any],
-) -> Tuple[Tensor, Tuple[Any, ...], Mapping[str, Any]]:
+    args: tuple,
+    kwargs: dict,
+) -> tuple[Tensor, tuple, dict]:
 
     if isinstance(hidden_states, CompressedTensor):
         detached_hidden_states = hidden_states.reconstruct().detach()
@@ -24,16 +24,17 @@ def detach_variable(
 
     detached_args = []
     for arg in args:
-        if not isinstance(arg, torch.Tensor):
+        if not isinstance(arg, Tensor):
             detached_args.append(arg)
         else:
             x = arg.detach()
             x.requires_grad = arg.requires_grad
             detached_args.append(x)
+    detached_args = tuple(detached_args)
 
     detached_kwargs = {}
     for key, val in kwargs.items():
-        if not isinstance(val, torch.Tensor):
+        if not isinstance(val, Tensor):
             detached_kwargs[key] = val
         else:
             x = val.detach()
@@ -46,16 +47,16 @@ def detach_variable(
 class CheckpointFunction(torch.autograd.Function):
     @staticmethod
     def forward(
-        run_function: Any,
-        self: Any,
+        run_function: Callable,
+        self: nn.Module,
         hidden_states: Tensor,
         preserve_rng_state: bool,
-        dummy: Optional[Tensor],
-        compress_kwargs: Optional[Mapping[str, Any]],
+        dummy: Tensor | None,
+        compress_kwargs: dict | None,
         n_args: int,
         n_kwargs: int,
-        *args_kwargs: Tuple[Any, ...],
-    ) -> Tuple[Any, ...]:
+        *args_kwargs,
+    ):
         args, kwargs_keys, kwargs_vals = \
             args_kwargs[:n_args], args_kwargs[n_args:-n_kwargs], args_kwargs[-n_kwargs:]
         kwargs = dict(zip(kwargs_keys, kwargs_vals))
@@ -64,7 +65,7 @@ class CheckpointFunction(torch.autograd.Function):
         return outputs
 
     @staticmethod
-    def setup_context(ctx: Any, inputs: Tuple[Any, ...], output: Any) -> None:
+    def setup_context(ctx, inputs, output):
         run_function, self, hidden_states, preserve_rng_state, dummy, compress_kwargs, n_args, n_kwargs, *args_kwargs = inputs
         args, kwargs_keys, kwargs_vals = \
             args_kwargs[:n_args], args_kwargs[n_args:-n_kwargs], args_kwargs[-n_kwargs:]
@@ -123,7 +124,7 @@ class CheckpointFunction(torch.autograd.Function):
         ctx.save_for_backward(*saved_tensors)
 
     @staticmethod
-    def backward(ctx: Any, *grad_outputs: Tuple[Tensor, ...]) -> Tuple[Any, ...]:
+    def backward(ctx, *grad_outputs: Tensor) -> tuple[Tensor | None, ...]:
         # Copy the list to avoid modifying original list.
         input_args = ctx.input_args
         input_kwargs = ctx.input_kwargs
@@ -152,9 +153,9 @@ class CheckpointFunction(torch.autograd.Function):
                     set_device_states(ctx.fwd_devices, ctx.fwd_device_states, device_type=ctx.device_type)
             detached_hidden_states, detached_args, detached_kwargs = detach_variable(hidden_states, input_args, input_kwargs)
 
-            device_autocast_ctx = torch.amp.autocast(
+            device_autocast_ctx = torch.autocast(
                 device_type=ctx.device_type, **ctx.device_autocast_kwargs
-            ) if torch.amp.is_autocast_available(ctx.device_type) else contextlib.nullcontext()
+            ) if torch.amp.autocast_mode.is_autocast_available(ctx.device_type) else contextlib.nullcontext()
             with torch.enable_grad(), device_autocast_ctx, torch.amp.autocast("cpu", **ctx.cpu_autocast_kwargs):  # type: ignore[attr-defined]
                 outputs = ctx.run_function(ctx.self, detached_hidden_states, *detached_args, **detached_kwargs)
 

@@ -1,17 +1,16 @@
 from math import sqrt
-from typing import *
 
 import torch
 from torch import Tensor
 
-from ._config import CONFIG
+from . import config
 
 
 def qr(
     A: Tensor,
-) -> Tuple[Tensor, Tensor]:
+) -> tuple[Tensor, Tensor]:
     """
-    QR decomposition.
+    QR decomposition, defined as `A = Q @ R`.
 
     Args:
         A (Tensor):
@@ -27,9 +26,9 @@ def qr(
 
     Q, R = torch.linalg.qr(A.float().nan_to_num_(0))
 
-    if CONFIG.SCALING_UNIT:
-        Q *= sqrt(m)
-        R /= sqrt(m)
+    if config.SCALING_UNIT:
+        Q.mul_(sqrt(m))
+        R.div_(sqrt(m))
 
     Q = Q.to(A.dtype)
     R = R.to(A.dtype)

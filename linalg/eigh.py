@@ -1,56 +1,56 @@
 from math import sqrt
-from typing import *
 
 import torch
 from torch import Tensor
 
-from ._config import CONFIG
+from . import config
 
 
 def truncated_eigh(
     A: Tensor,
-    rank: Optional[int] = None,
-) -> Tuple[Tensor, Tensor]:
+    rank: int | None = None,
+) -> tuple[Tensor, Tensor]:
     """
-    Truncated eigenvalue decomposition of a real symmetric matrix.
+    Truncated eigenvalue decomposition of a real symmetric matrix,
+    defined as `A = U @ L.diag_embed() @ U.mT`.
 
     Args:
         A (Tensor):
             &#45; with shape `(*, n, n)`.
-        rank (int, optional):
+        rank (int or None, optional):
             &#45; target `rank`. If `None`, no truncation is applied.
             Default: `None`.
 
     Returns:
-        (L, Q) (Tensor, Tensor):
+        (L, U) (Tensor, Tensor):
             &#45; with shape `(*, k)`, `(*, n, k)`, where `k = min(n, rank)`.
     """
     assert isinstance(A, Tensor)
-    assert isinstance(rank, Optional[int])
+    assert isinstance(rank, int | None)
 
     n = A.shape[-1]
 
-    L, Q = torch.linalg.eigh(A.float().nan_to_num_(0))
+    L, U = torch.linalg.eigh(A.float().nan_to_num_(0))
 
-    if CONFIG.SCALING_UNIT:
-        Q *= sqrt(n)
-        L /= n
+    if config.SCALING_UNIT:
+        U.mul_(sqrt(n))
+        L.div_(n)
 
     L = L.to(A.dtype).flip(-1)  # (*, n)
-    Q = Q.to(A.dtype).flip(-1)  # (*, n, n)
+    U = U.to(A.dtype).flip(-1)  # (*, n, n)
 
     if rank is not None:
         L = L[..., :rank]  # (*, k)
-        Q = Q[..., :, :rank]  # (*, n, k)
+        U = U[..., :, :rank]  # (*, n, k)
 
     L.mul_(L.gt(0))  # (*, k)
-    Q.mul_(L.gt(0).unsqueeze_(-2))  # (*, n, k)
-    return L, Q
+    U.mul_(L.gt(0).unsqueeze_(-2))  # (*, n, k)
+    return L, U
 
 
 def eigh_reconstruct(
     L: Tensor,
-    Q: Tensor,
+    U: Tensor,
 ) -> Tensor:
     """
     Reconstruction of eigenvalue decomposition.
@@ -58,7 +58,7 @@ def eigh_reconstruct(
     Args:
         L (Tensor):
             &#45; with shape `(*, k)`.
-        Q (Tensor):
+        U (Tensor):
             &#45; with shape `(*, n, k)`.
 
     Returns:
@@ -66,6 +66,6 @@ def eigh_reconstruct(
             &#45; with shape `(*, n, n)`.
     """
     assert isinstance(L, Tensor)
-    assert isinstance(Q, Tensor)
+    assert isinstance(U, Tensor)
 
-    return Q @ L.diag_embed() @ Q.mT
+    return U @ L.diag_embed() @ U.mT

@@ -1,10 +1,5 @@
 from collections import UserDict
-from typing import *
-from weakref import ref, WeakKeyDictionary
-
-import torch
-
-torch.compiler.allow_in_graph(ref)
+from weakref import WeakKeyDictionary
 
 
 class HashKeyDict(UserDict):

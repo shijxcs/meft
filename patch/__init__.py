@@ -1,35 +1,36 @@
 import warnings
-from typing import *
+from collections.abc import Iterable
 
 from transformers.modeling_utils import PreTrainedModel
 
-from .cohere import *
-from .cohere2 import *
-from .deepseek_v3 import *
-from .gemma import *
-from .gemma2 import *
-from .gemma3 import *
-from .glm4 import *
-from .granite import *
-from .llama import *
-from .llama4 import *
-from .llava import *
-from .mistral import *
-from .mixtral import *
-from .mllama import *
-from .olmo import *
-from .olmo2 import *
-from .paligemma import *
-from .phi import *
-from .phi3 import *
-from .qwen2 import *
-from .qwen2_vl import *
-from .qwen2_5_vl import *
-from .qwen3 import *
-from .qwen3_moe import *
-from .siglip import *
-from .siglip2 import *
-from .vit import *
+from .models.cohere import *
+from .models.cohere2 import *
+from .models.deepseek_v3 import *
+from .models.gemma import *
+from .models.gemma2 import *
+from .models.gemma3 import *
+from .models.glm4 import *
+from .models.granite import *
+from .models.llama import *
+from .models.llama4 import *
+from .models.llava import *
+from .models.mistral import *
+from .models.mixtral import *
+from .models.mllama import *
+from .models.olmo import *
+from .models.olmo2 import *
+from .models.paligemma import *
+from .models.phi import *
+from .models.phi3 import *
+from .models.qwen2 import *
+from .models.qwen2_vl import *
+from .models.qwen2_5_vl import *
+from .models.qwen3 import *
+from .models.qwen3_moe import *
+from .models.siglip import *
+from .models.siglip2 import *
+from .models.swin import *
+from .models.vit import *
 
 
 MODEL_TYPE_TO_APPLY_FN = {
@@ -69,14 +70,15 @@ MODEL_TYPE_TO_APPLY_FN = {
     "siglip2": apply_patch_to_siglip2_model,
     "siglip2_text_model": apply_patch_to_siglip2_text_model,
     "siglip2_vision_model": apply_patch_to_siglip2_vision_model,
+    "swin": apply_patch_to_swin_model,
     "vit": apply_patch_to_vit_model,
 }
 
 
 def apply_patch_to_model(
     model: PreTrainedModel,
-    patch_locations: Optional[Iterable] = None,
-    compress_kwargs: Optional[Mapping[str, Any]] = None,
+    patch_locations: Iterable | None = None,
+    compress_kwargs: dict | None = None,
 ) -> None:
     """
     Apply patch to modules by replacing their forward methods. Note that
@@ -95,10 +97,12 @@ def apply_patch_to_model(
 
     apply_fn = MODEL_TYPE_TO_APPLY_FN[model_type]
 
-    if patch_locations is None:
-        locations_kwargs = {}
-    else:
-        locations_kwargs = {loc: True for loc in patch_locations}
-    print(f"Applying patch to {model_type} model in: {tuple(locations_kwargs.keys())}")
-
-    apply_fn(model=model, **locations_kwargs, compress_kwargs=compress_kwargs)
+    if patch_locations:
+        if isinstance(patch_locations, dict):
+            locations_kwargs = {loc: True for loc in patch_locations if patch_locations[loc] == True}
+        elif isinstance(patch_locations, Iterable):
+            locations_kwargs = {loc: True for loc in patch_locations}
+        else:
+            raise TypeError("Invalid type of `patch_locations`, must be `Iterable` or `None`.")
+        print(f"Applying patch to {model_type} model in: {tuple(locations_kwargs.keys())}")
+        apply_fn(model=model, **locations_kwargs, compress_kwargs=compress_kwargs)

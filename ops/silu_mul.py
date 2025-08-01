@@ -1,5 +1,3 @@
-from typing import *
-
 import torch
 from torch import nn, Tensor
 
@@ -12,15 +10,14 @@ class SiLUMulFunction(torch.autograd.Function):
     def forward(
         input: Tensor,
         alpha: Tensor,
-        compress_kwargs: Optional[Mapping[str, Any]] = None,
+        compress_kwargs: dict | None = None,
     ) -> Tensor:
         silu = nn.functional.silu(input)
         output = silu * alpha
         return output
 
-    @torch.compile
     @staticmethod
-    def setup_context(ctx: Any, inputs: Tuple[Any, ...], output: Any) -> None:
+    def setup_context(ctx, inputs, output):
         input, alpha, compress_kwargs = inputs
         if compress_kwargs is not None:
             ctx.save_for_backward(CompressedTensor(input, **compress_kwargs), CompressedTensor(alpha, **compress_kwargs))
@@ -29,7 +26,7 @@ class SiLUMulFunction(torch.autograd.Function):
 
     @torch.compile
     @staticmethod
-    def backward(ctx: Any, grad_output: Tensor) -> Tuple[Tensor, Tensor, None]:
+    def backward(ctx, grad_output: Tensor) -> tuple[Tensor | None, ...]:
         input, alpha = ctx.saved_tensors
 
         if isinstance(input, CompressedTensor):
@@ -37,10 +34,17 @@ class SiLUMulFunction(torch.autograd.Function):
         if isinstance(alpha, CompressedTensor):
             alpha = alpha.reconstruct()
 
-        silu = nn.functional.silu(input)
-        sigmoid = torch.sigmoid(input)
+        if ctx.needs_input_grad[0]:
+            sigmoid = torch.sigmoid(input)
+            grad_silu = grad_output * alpha
+            grad_input = grad_silu * (sigmoid + sigmoid * (1 - sigmoid) * input)
+        else:
+            grad_input = None
 
-        grad_silu = grad_output * alpha
-        grad_alpha = grad_output * silu
-        grad_input = grad_silu * (sigmoid + sigmoid * (1 - sigmoid) * input)
+        if ctx.needs_input_grad[1]:
+            silu = nn.functional.silu(input)
+            grad_alpha = grad_output * silu
+        else:
+            grad_alpha = None
+
         return grad_input, grad_alpha, None

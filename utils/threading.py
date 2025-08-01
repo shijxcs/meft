@@ -1,6 +1,6 @@
 import queue
 import threading
-from typing import *
+from collections.abc import Callable, Iterable
 
 import torch
 import torch.cuda
@@ -11,8 +11,8 @@ class TaskProcessor:
     def __init__(self, device="cuda"):
         self.device = device
         self.running = False
-        self.threads = []
-        self.streams = []
+        self.threads = list[threading.Thread]()
+        self.streams = list[torch._C._CudaStreamBase]()
 
     def start(self, num_workers: int = 2):
         self.running = True
@@ -43,12 +43,13 @@ class TaskProcessor:
                     with torch.cuda.stream(stream):
                         results = func(*args, **kwargs)
 
-                        if isinstance(results, tuple):
-                            for out, res in zip(outputs, results):
-                                if isinstance(res, Tensor):
-                                    out.copy_(res, non_blocking=True)
-                        elif isinstance(results, Tensor):
-                            outputs.copy_(results, non_blocking=True)
+                        if outputs is not None:
+                            if isinstance(results, Tensor):
+                                outputs.append(results)
+                            elif isinstance(results, Iterable):
+                                outputs.extend(results)
+
+                        torch.cuda.current_stream().synchronize()
 
                 except Exception as e:
                     print(f"Error processing task: {e}")
@@ -59,7 +60,7 @@ class TaskProcessor:
             except queue.Empty:
                 continue
 
-    def submit(self, func: Callable, args: Tuple = None, kwargs: Mapping[str, Any] = None, outputs: Any = None):
+    def submit(self, func: Callable, args: tuple | None = None, kwargs: dict | None = None, outputs: list | None = None):
         if args is None:
             args = ()
         if kwargs is None:
